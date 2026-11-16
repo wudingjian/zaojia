@@ -16,7 +16,6 @@ on:
       - 'output/**'
       - 'Dockerfile'
       - 'nginx.conf'
-      - 'docker-compose.yml'
       - '.dockerignore'
   workflow_dispatch:
 
