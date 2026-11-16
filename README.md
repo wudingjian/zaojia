@@ -7,8 +7,10 @@
 ![AI](https://img.shields.io/badge/AI-assisted-f59e0b)
 [![deployment](https://img.shields.io/badge/deployment-Vercel-000000?logo=vercel)](https://costdata.cybertumu.com/)
 [![online](https://img.shields.io/badge/online-costdata.cybertumu.com-2563eb?logo=googlechrome&logoColor=white)](https://costdata.cybertumu.com/app/)
-> 本项目fork自https://github.com/BruceLee1024/zaojia-database，本仓库进行二次开发和优化。
-> 在线体验：[产品介绍页](https://zaojia.laowu.com/) · [直接进入工作台](https://costdata.cybertumu.com/app/)
+> 本项目fork自[BruceLee1024/zaojia-database](https://github.com/BruceLee1024/zaojia-database)
+>
+> 本仓库进行二次开发和优化。
+
 
 **项目标签：** `个人造价` `工程造价` `数据沉淀` `经验管理` `个人定额库` `材料设备库` `工程量清单` `报价版本` `造价指标` `AI 助手` `复盘笔记` `IndexedDB` `纯前端` `Vercel`
 
