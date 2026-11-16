@@ -46,8 +46,8 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          provenance: false
           tags: |
             jsntwdj/zaojia-database:latest
-            jsntwdj/zaojia-database:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
