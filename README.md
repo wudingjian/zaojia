@@ -6,7 +6,7 @@
 ![backend](https://img.shields.io/badge/backend-none-64748b)
 ![AI](https://img.shields.io/badge/AI-assisted-f59e0b)
 [![deployment](https://img.shields.io/badge/deployment-Vercel-000000?logo=vercel)](https://costdata.cybertumu.com/)
-[![online](https://img.shields.io/badge/online-costdata.cybertumu.com-2563eb?logo=googlechrome&logoColor=white)](https://costdata.cybertumu.com/app/)
+[![online](https://img.shields.io/badge/online-costdata.cybertumu.com-2563eb?logo=googlechrome&logoColor=white)](https://zj.zje.cc/app/)
 > 本项目fork自[BruceLee1024/zaojia-database](https://github.com/BruceLee1024/zaojia-database)
 >
 > 本仓库进行二次开发和优化。
