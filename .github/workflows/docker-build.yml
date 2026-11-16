@@ -7,13 +7,10 @@ on:
       - master
     paths:
       - 'index.html'
-      - 'landing.html'
       - 'app.js'
-      - 'vercel.json'
       - 'app/**'
       - 'assets/**'
       - 'landing-assets/**'
-      - 'output/**'
       - 'Dockerfile'
       - 'nginx.conf'
       - '.dockerignore'

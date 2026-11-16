@@ -1,8 +1,10 @@
 .git
 .gitignore
 .superpowers
+.github
 docs
 tests
+output
 README.md
 design-qa.md
 AGENTS.md
@@ -10,4 +12,5 @@ LICENSE
 e838bd3f75030c590994f77b9a903075.txt
 Dockerfile
 docker-compose.yml
+vercel.json
 .dockerignore
