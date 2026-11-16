@@ -1,0 +1,541 @@
+// 视图：我的项目
+import { projectService } from '../services/projectService.js?v=6.15';
+import { indicatorService } from '../services/indicatorService.js?v=6.15';
+import { boqRepo, versionRepo } from '../data/repository.js?v=6.15';
+import { fmt, fmtMoney, esc, openModal, closeModal, toast, scopedDom } from '../utils/dom.js?v=6.15';
+import { hasMissingPrice } from '../utils/costing.js?v=6.15';
+import { openReview } from './experience.js?v=6.15';
+import { archiveEligibility, archiveBlockerText } from '../services/projectWorkflow.js?v=6.15';
+import { suggestProjectInfo } from '../services/aiAssistService.js?v=6.15';
+import { CURRENCY_OPTIONS, currencyLabel, normalizeCurrency } from '../utils/currency.js?v=6.15';
+
+const TYPES = [
+  '水厂', '污水处理厂', '再生水厂', '工业废水', '泵站', '管网', '调蓄池', '水池', '污泥处理',
+  '房屋建筑', '住宅建筑', '公共建筑', '工业厂房', '园区建设',
+  '市政道路', '桥梁隧道', '综合管廊', '水利工程', '电力工程', '变电站',
+  '设备安装', '厂区配套', '车间', '其他'
+];
+const SCALES = ['小型', '中型', '大型', '特大型'];
+const WATER_PROJECT_TYPES = new Set(['水厂', '污水处理厂', '再生水厂', '工业废水', '泵站', '管网', '调蓄池', '水池', '污泥处理']);
+const projectState = { status: '', type: '', risk: '', version: '', keyword: '', selectedId: '' };
+
+export async function render(workspace = document.getElementById('workspace')) {
+  const document = scopedDom(workspace);
+  const params = window.__app?.state?.routeParams || {};
+  if (params.keyword != null) projectState.keyword = params.keyword;
+  if (params.selectedId) projectState.selectedId = params.selectedId;
+  const [projects, allBoq, versions] = await Promise.all([projectService.list(), boqRepo.all(), versionRepo.all()]);
+  const projectTypes = [...new Set([...TYPES, ...projects.map(project => project.type).filter(type => type && !TYPES.includes(type))])];
+  const summaries = projects.map(p => buildProjectStatus(p, allBoq, versions));
+  const visibleProjects = summaries.filter(s => {
+    const kw = projectState.keyword.trim().toLowerCase();
+    if (kw && !`${s.project.name || ''} ${s.project.type || ''} ${s.project.scale || ''} ${s.project.process || ''} ${s.project.structure || ''}`.toLowerCase().includes(kw)) return false;
+    if (projectState.status && s.project.status !== projectState.status) return false;
+    if (projectState.type && s.project.type !== projectState.type) return false;
+    if (projectState.risk === 'missing' && !s.missing) return false;
+    if (projectState.risk === 'ok' && s.missing) return false;
+    if (projectState.version === 'has' && !s.versionCount) return false;
+    if (projectState.version === 'none' && s.versionCount) return false;
+    return true;
+  });
+  const portfolio = portfolioStats(summaries);
+  workspace.innerHTML = `
+    <div class="page-frame min-h-full flex flex-col gap-4">
+      <section class="rounded-lg border border-slate-200 bg-white p-4">
+        <div class="flex items-start gap-4">
+          <div>
+            <h1 class="text-xl font-semibold text-slate-950">我的项目</h1>
+            <div class="mt-1 text-xs text-slate-500">从项目状态判断下一步：补价、保存版本、收录案例或查看造价参考。</div>
+          </div>
+          <div class="flex-1"></div>
+          <button id="btnNew" class="h-10 px-4 text-sm brand-bg text-white flex items-center gap-1.5">
+            <span class="material-symbols-outlined text-[18px]">add</span>新建项目
+          </button>
+        </div>
+        <div class="mt-4 grid grid-cols-5 gap-3">
+          ${summaryTile('项目总数', portfolio.totalProjects, '个')}
+          ${summaryTile('报价中', portfolio.doingProjects, '个')}
+          ${summaryTile('缺单价项目', portfolio.missingProjects, '个', portfolio.missingProjects ? 'text-amber-700' : '')}
+          ${summaryTile('未保存版本', portfolio.noVersionProjects, '个', portfolio.noVersionProjects ? 'text-amber-700' : '')}
+          ${summaryTile('可收录案例', portfolio.readyToArchive, '个')}
+        </div>
+        <div class="mt-4 flex items-center gap-2 text-sm">
+          <input id="pf_keyword_filter" value="${esc(projectState.keyword)}" class="h-9 w-64 rounded border border-slate-300 bg-white px-3" placeholder="搜索项目名称 / 类型 / 特征..." />
+          <select id="pf_status_filter" class="h-9 rounded border border-slate-300 bg-white px-2">
+            <option value="">全部状态</option>
+            <option value="doing" ${projectState.status === 'doing' ? 'selected' : ''}>进行中</option>
+            <option value="archived" ${projectState.status === 'archived' ? 'selected' : ''}>已收录案例</option>
+          </select>
+          <select id="pf_type_filter" class="h-9 rounded border border-slate-300 bg-white px-2">
+            <option value="">全部类型</option>
+            ${projectTypes.map(t => `<option value="${esc(t)}" ${projectState.type === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}
+          </select>
+          <select id="pf_risk_filter" class="h-9 rounded border border-slate-300 bg-white px-2">
+            <option value="">全部风险</option>
+            <option value="missing" ${projectState.risk === 'missing' ? 'selected' : ''}>有缺价风险</option>
+            <option value="ok" ${projectState.risk === 'ok' ? 'selected' : ''}>价格完整</option>
+          </select>
+          <select id="pf_version_filter" class="h-9 rounded border border-slate-300 bg-white px-2">
+            <option value="">全部版本</option>
+            <option value="has" ${projectState.version === 'has' ? 'selected' : ''}>已有版本</option>
+            <option value="none" ${projectState.version === 'none' ? 'selected' : ''}>未保存版本</option>
+          </select>
+          <div class="flex-1"></div>
+          <span class="text-xs text-slate-500">显示 ${visibleProjects.length} / ${projects.length} 个项目</span>
+        </div>
+      </section>
+
+      ${portfolio.missingProjects || portfolio.noVersionProjects ? `
+        <section class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 flex items-center gap-3 text-sm text-amber-800">
+          <span class="material-symbols-outlined text-[20px]">priority_high</span>
+          <div class="font-medium">当前项目组合还有 ${portfolio.missingProjects} 个缺价项目、${portfolio.noVersionProjects} 个未保存版本项目。</div>
+          <div class="flex-1"></div>
+          <button onclick="window.__app.go('boq')" class="h-8 px-3 rounded border border-amber-300 bg-white text-amber-800">进入清单处理</button>
+        </section>
+      ` : ''}
+
+      <section class="grid grid-cols-3 gap-3">
+        ${visibleProjects.length ? visibleProjects.map(projectCard).join('') : `<div class="col-span-3 rounded-lg border border-slate-200 bg-white p-10 text-center text-slate-400">${projects.length ? '没有符合筛选条件的项目。' : '还没有项目，点右上角「新建项目」开始建立项目资料。'}</div>`}
+      </section>
+    </div>
+  `;
+  document.getElementById('btnNew').onclick = () => editForm({ id: '', name: '', code: '', client: '', type: '', scale: '', dailyCapacity: '', area: '', structure: '', process: '', region: '', priceYear: String(new Date().getFullYear()), stage: '投标报价', status: 'doing' });
+  document.getElementById('pf_keyword_filter')?.addEventListener('input', e => {
+    projectState.keyword = e.target.value;
+    clearTimeout(window.__projectSearchTimer);
+    window.__projectSearchTimer = setTimeout(() => render(), 160);
+  });
+  ['status', 'type', 'risk', 'version'].forEach(key => {
+    const el = document.getElementById(`pf_${key}_filter`);
+    if (el) el.onchange = () => { projectState[key] = el.value; render(); };
+  });
+  document.querySelectorAll('[data-edit]').forEach(b => b.onclick = async () => {
+    const p = await projectService.get(b.dataset.edit);
+    if (p?.status === 'archived') {
+      toast('该项目已收录为案例；请先解锁修订后再编辑。', 'error');
+      return;
+    }
+    if (p) editForm(p);
+  });
+  document.querySelectorAll('[data-archive]').forEach(b => b.onclick = async () => {
+    const p = await projectService.get(b.dataset.archive);
+    if (p?.status === 'archived') {
+      const reason = prompt('请输入解锁修订原因。解锁后旧案例样本将撤出造价参考：');
+      if (reason == null) return;
+      const updated = await projectService.unlockForRevision(p.id, reason);
+      toast(`已解锁修订（第 ${updated.revisionCount || 1} 次），请修改后重新收录。`, 'success');
+      render();
+      return;
+    }
+    if (!confirm('收录后会创建不可变案例快照并锁定项目。确定收录？')) return;
+    try {
+      const updated = await projectService.archive(b.dataset.archive);
+      toast('案例状态已更新，造价参考已同步');
+      render();
+      if (updated?.status === 'archived') openReview({ projectId: updated.id, sourceType: 'project_archive' });
+    } catch (err) {
+      if (err?.code === 'ARCHIVE_BLOCKED') {
+        toast(`暂不能收录：${archiveBlockerText(err.eligibility)}`, 'error');
+        return;
+      }
+      if (err?.code === 'PROJECT_CURRENCY_LOCKED') {
+        toast(err.message, 'error');
+        return;
+      }
+      throw err;
+    }
+  });
+  document.querySelectorAll('[data-blocked]').forEach(b => b.onclick = () => {
+    const params = { projectId: b.dataset.blocked };
+    if (b.dataset.priceStatus) params.priceStatus = b.dataset.priceStatus;
+    if (b.dataset.riskStatus) params.riskStatus = b.dataset.riskStatus;
+    window.__app.go('boq', params);
+  });
+  document.querySelectorAll('[data-open]').forEach(b => b.onclick = () => {
+    const params = { projectId: b.dataset.open };
+    if (b.dataset.priceStatus) params.priceStatus = b.dataset.priceStatus;
+    if (b.dataset.riskStatus) params.riskStatus = b.dataset.riskStatus;
+    window.__app.go('boq', params);
+  });
+  document.querySelectorAll('[data-indicators]').forEach(b => b.onclick = () => window.__app.go('indicators'));
+  document.querySelectorAll('[data-del]').forEach(b => b.onclick = async () => {
+    if (!confirm('删除项目会同时删除该项目下所有清单，确定？')) return;
+    await projectService.remove(b.dataset.del);
+    render();
+    toast('已删除');
+  });
+  if (params.action === 'new') {
+    window.__app.state.routeParams = {};
+    editForm({ id: '', name: '', code: '', client: '', type: '', scale: '', dailyCapacity: '', area: '', structure: '', process: '', region: '', priceYear: String(new Date().getFullYear()), stage: '投标报价', status: 'doing', currency: 'CNY' });
+  }
+}
+
+function buildProjectStatus(project, allBoq, allVersions) {
+  const lines = allBoq.filter(b => b.projectId === project.id);
+  const versions = allVersions.filter(v => v.projectId === project.id);
+  const missing = lines.filter(b => hasMissingPrice(b.unitPrice)).length;
+  const priced = lines.length - missing;
+  const completion = lines.length ? Math.round(priced / lines.length * 100) : 0;
+  const unitCost = project.area ? Number(project.totalCost || 0) / Number(project.area) : 0;
+  const waterCost = project.dailyCapacity ? Number(project.totalCost || 0) / (Number(project.dailyCapacity) * 10000) : 0;
+  const next = projectNextAction(project, { lines, versions, missing });
+  const eligibility = archiveEligibility(project, lines, versions);
+  return {
+    project,
+    lines,
+    lineCount: lines.length,
+    missing,
+    versionCount: versions.length,
+    completion,
+    unitCost,
+    waterCost,
+    eligibility,
+    readyToArchive: eligibility.allowed,
+    next,
+  };
+}
+
+function portfolioStats(summaries) {
+  return {
+    totalProjects: summaries.length,
+    doingProjects: summaries.filter(s => s.project.status !== 'archived').length,
+    missingProjects: summaries.filter(s => s.missing > 0).length,
+    noVersionProjects: summaries.filter(s => s.lineCount > 0 && s.versionCount === 0).length,
+    readyToArchive: summaries.filter(s => s.readyToArchive).length,
+  };
+}
+
+function projectNextAction(project, { lines, versions, missing }) {
+  if (missing) return {
+    title: `下一步：补齐 ${missing} 条缺单价`,
+    desc: '先定位缺价项，再保存版本或导出报价。',
+    button: '去补缺价',
+    tone: 'amber',
+    priceStatus: 'missing',
+  };
+  if (!lines.length) return {
+    title: '下一步：导入或添加清单',
+    desc: '项目已有档案，下一步建立工程量清单。',
+    button: '打开清单',
+    tone: 'slate',
+  };
+  const zeroQty = lines.filter(line => !(Number(line.qty) > 0)).length;
+  if (zeroQty) return {
+    title: `下一步：复核 ${zeroQty} 条 0 工程量`,
+    desc: '0 工程量会降低案例的可参考程度。',
+    button: '复核工程量',
+    tone: 'amber',
+    riskStatus: 'zeroQty',
+  };
+  if (!versions.length) return {
+    title: '下一步：保存报价版本',
+    desc: '为当前报价创建可回退快照。',
+    button: '去保存版本',
+    tone: 'teal',
+  };
+  if (project.status !== 'archived') return {
+    title: '下一步：收录为参考案例',
+    desc: '价格完整且已有版本，可收录为后续造价参考。',
+    button: '准备收录',
+    tone: 'slate',
+  };
+  return {
+    title: '下一步：查看造价参考',
+    desc: '用历史案例解释当前造价是否合理。',
+    button: '查看参考',
+    tone: 'teal',
+    indicators: true,
+  };
+}
+
+function nextToneClass(tone) {
+  return tone === 'amber' ? 'border-amber-200 bg-amber-50 text-amber-800'
+    : tone === 'teal' ? 'border-teal-200 bg-teal-50 text-teal-800'
+      : 'border-slate-200 bg-white text-slate-700';
+}
+
+function primaryButton(summary) {
+  const { project, next } = summary;
+  if (next.indicators) {
+    return `<button data-indicators="${project.id}" class="h-9 px-3 text-xs rounded border border-teal-600 text-teal-700 hover:bg-teal-50">查看指标</button>`;
+  }
+  return `<button data-open="${project.id}" ${next.priceStatus ? `data-price-status="${next.priceStatus}"` : ''} ${next.riskStatus ? `data-risk-status="${next.riskStatus}"` : ''} class="h-9 px-3 text-xs rounded border border-teal-600 text-teal-700 hover:bg-teal-50">${esc(next.button)}</button>`;
+}
+
+function summaryTile(label, value, unit, cls = '') {
+  return `<div class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+    <div class="text-xs text-slate-500">${label}</div>
+    <div class="mt-1 text-lg font-semibold tabular-nums text-slate-900 ${cls}">${value}<span class="ml-1 text-xs font-normal text-slate-500">${unit}</span></div>
+  </div>`;
+}
+
+function projectCard(summary) {
+  const { project: p, lineCount, missing, versionCount, completion, unitCost, waterCost, next, eligibility } = summary;
+  const waterSpecific = isWaterProjectType(p.type) || Boolean(p.dailyCapacity);
+  const archiveBlocked = p.status !== 'archived' && !eligibility.allowed;
+  const blocker = eligibility.blockers[0] || null;
+  return `<article class="rounded-lg border border-slate-200 bg-white overflow-hidden flex flex-col min-h-[330px]">
+    <div class="p-4 border-b border-slate-200 bg-white">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <div class="font-semibold leading-5 text-slate-900 truncate" title="${esc(p.name)}">${esc(p.name)}</div>
+          <div class="mt-1 flex items-center gap-2 text-xs text-slate-500">
+            <span>${esc(p.type || '未分类')}</span>
+            <span class="text-slate-300">/</span>
+            <span>${esc(p.scale || '不分规模')}</span>
+          </div>
+        </div>
+        ${statusBadge(p.status)}
+      </div>
+      <div class="mt-4 flex items-end justify-between gap-3">
+        <div>
+          <div class="text-xs text-slate-500">项目总造价</div>
+          <div class="mt-1 text-2xl font-semibold tabular-nums text-teal-700">${fmtMoney(p.totalCost || 0, p.currency)}</div>
+        </div>
+        <div class="text-right text-xs text-slate-500">
+          <div>${lineCount} 条清单</div>
+          <div>${versionCount} 个版本</div>
+          <div class="${missing ? 'text-amber-700' : 'text-slate-500'}">${missing ? `缺单价 ${missing}` : '价格完整'}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="p-4 flex-1 bg-slate-50/60">
+      <div class="grid grid-cols-2 gap-2 text-sm">
+        ${waterSpecific ? miniMetric('日处理量', p.dailyCapacity ? `${esc(p.dailyCapacity)} 万m³/d` : '-') : miniMetric('项目类型', p.type || '未分类')}
+        ${miniMetric('建筑面积', p.area ? `${esc(p.area)} ㎡` : '-')}
+        ${miniMetric('单方造价', p.area ? `${fmtMoney(unitCost, p.currency)}/㎡` : '-')}
+        ${waterSpecific ? miniMetric('单水造价', p.dailyCapacity ? `${fmtMoney(waterCost, p.currency)}/(m³·d)` : '-') : miniMetric('价格年份', p.priceYear || '-')}
+        ${miniMetric('报价版本', `${versionCount} 个`)}
+        ${miniMetric('缺价条目', `${missing} 条`)}
+      </div>
+      <div class="mt-4">
+        <div class="mb-1 flex items-center justify-between text-xs">
+          <span class="text-slate-500">价格完整度</span>
+          <span class="tabular-nums ${missing ? 'text-amber-700' : 'text-teal-700'}">${completion}%</span>
+        </div>
+        <div class="h-2 rounded bg-slate-200 overflow-hidden">
+          <div class="h-2 rounded ${missing ? 'bg-amber-500' : 'bg-teal-600'}" style="width:${completion}%"></div>
+        </div>
+      </div>
+      <div class="mt-4 flex items-center gap-2 text-xs text-slate-500">
+        <span class="badge badge-gray">${esc(p.structure || '未填结构')}</span>
+        <span class="badge badge-gray">${esc(p.process || '未填专业特征')}</span>
+        ${p.region ? `<span class="badge badge-gray">${esc(p.region)}</span>` : ''}
+        ${p.stage ? `<span class="badge badge-gray">${esc(p.stage)}</span>` : ''}
+      </div>
+      <button data-open="${p.id}" ${next.priceStatus ? `data-price-status="${next.priceStatus}"` : ''} ${next.riskStatus ? `data-risk-status="${next.riskStatus}"` : ''} class="mt-4 w-full rounded border ${nextToneClass(next.tone)} px-3 py-2 text-left text-xs hover:bg-white">
+        <div class="font-medium">${esc(next.title)}</div>
+        <div class="mt-1 opacity-80">${esc(next.desc)}</div>
+      </button>
+    </div>
+
+    <div class="px-4 py-3 border-t border-slate-200 bg-white flex items-center gap-2">
+      ${primaryButton(summary)}
+      <button data-edit="${p.id}" class="px-2.5 py-1.5 text-xs rounded border border-slate-300 hover:bg-slate-50">编辑</button>
+      ${archiveBlocked
+        ? `<button data-blocked="${p.id}" ${blocker?.params?.priceStatus ? `data-price-status="${blocker.params.priceStatus}"` : ''} ${blocker?.params?.riskStatus ? `data-risk-status="${blocker.params.riskStatus}"` : ''} class="px-2.5 py-1.5 text-xs rounded border border-amber-300 text-amber-700 hover:bg-amber-50" title="${esc(archiveBlockerText(eligibility))}">查看阻断</button>`
+        : `<button data-archive="${p.id}" class="px-2.5 py-1.5 text-xs rounded border border-slate-300 hover:bg-slate-50">${p.status === 'archived' ? '解锁修订' : '收录案例'}</button>`}
+      <div class="flex-1"></div>
+      <button data-del="${p.id}" class="px-2.5 py-1.5 text-xs rounded border text-red-600 border-red-300 hover:bg-red-50">删除</button>
+    </div>
+  </article>`;
+}
+
+function miniMetric(label, value) {
+  return `<div class="rounded border border-slate-200 bg-white px-3 py-2">
+    <div class="text-xs text-slate-500">${label}</div>
+    <div class="mt-1 text-sm font-medium tabular-nums text-slate-800 truncate">${value}</div>
+  </div>`;
+}
+
+function isWaterProjectType(type = '') {
+  const value = String(type).trim();
+  return WATER_PROJECT_TYPES.has(value) || /水厂|污水|废水|再生水|污泥|泵站|水池|调蓄|管网/.test(value);
+}
+
+function statusBadge(s) {
+  return s === 'archived' ? '<span class="badge badge-green">已收录案例</span>'
+       : s === 'doing'    ? '<span class="badge badge-yellow">进行中</span>'
+       : '<span class="badge badge-gray">未开始</span>';
+}
+
+function editForm(p) {
+  const isCustomType = Boolean(p.type && !TYPES.includes(p.type));
+  const selectedType = isCustomType ? '__custom__' : (p.type || '');
+  const showWaterMetrics = isWaterProjectType(p.type);
+  openModal((p.name ? '编辑' : '新建') + ' 项目', `
+    <div class="space-y-4 text-sm text-slate-700">
+      <section class="bg-white border border-slate-200 rounded-xl p-4">
+        <div class="mb-3 flex items-center justify-between">
+          <div>
+            <div class="font-semibold text-slate-800">基础信息</div>
+            <div class="mt-1 text-xs text-slate-500">用于项目档案、工程量清单和报价版本识别。</div>
+          </div>
+          <button id="pf_ai" class="px-2.5 py-1.5 text-xs rounded border border-teal-300 bg-teal-50 text-teal-700 inline-flex items-center gap-1">
+            <span class="material-symbols-outlined text-[15px]">auto_awesome</span>AI 识别项目信息
+          </button>
+          ${statusBadge(p.status)}
+        </div>
+        <div class="grid grid-cols-4 gap-3">
+          <label class="col-span-4 block text-xs font-medium text-slate-500">项目名称 <span class="text-red-500">*</span>
+            <input id="pf_name" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm text-slate-800" value="${esc(p.name)}" placeholder="请输入项目全称" />
+          </label>
+          <label class="col-span-2 block text-xs font-medium text-slate-500">项目编号
+            <input id="pf_code" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm" value="${esc(p.code || '')}" placeholder="请输入项目编号" />
+          </label>
+          <label class="col-span-2 block text-xs font-medium text-slate-500">建设单位 / 客户
+            <input id="pf_client" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm" value="${esc(p.client || '')}" placeholder="用于项目档案与成果封面" />
+          </label>
+          <label class="col-span-2 block text-xs font-medium text-slate-500">项目类型
+            <select id="pf_type" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm"><option value="" ${selectedType === '' ? 'selected' : ''}>请选择项目类型</option>${TYPES.map(t => `<option value="${esc(t)}" ${selectedType === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}<option value="__custom__" ${selectedType === '__custom__' ? 'selected' : ''}>自定义</option></select>
+            <input id="pf_type_custom" class="mt-2 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm ${isCustomType ? '' : 'hidden'}" value="${esc(isCustomType ? p.type : '')}" placeholder="请输入自定义项目类型" aria-label="自定义项目类型" />
+          </label>
+          <label class="col-span-2 block text-xs font-medium text-slate-500">状态
+            <select id="pf_status" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm"><option value="doing" ${p.status === 'doing' ? 'selected' : ''}>进行中</option><option value="archived" ${p.status === 'archived' ? 'selected' : ''}>已收录案例</option></select>
+          </label>
+        </div>
+      </section>
+
+      <section class="bg-white border border-slate-200 rounded-xl p-4">
+        <div class="mb-3">
+          <div class="font-semibold text-slate-800">规模参数</div>
+          <div class="mt-1 text-xs text-slate-500">用于计算单方造价和按适用口径进行历史指标对标。</div>
+        </div>
+        <div class="grid grid-cols-4 gap-3">
+          <label class="block text-xs font-medium text-slate-500">规模等级
+            <select id="pf_scale" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm"><option value="">不分规模</option>${SCALES.map(s => `<option ${p.scale === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+          </label>
+          <label id="pf_daily_wrap" class="block text-xs font-medium text-slate-500 ${showWaterMetrics ? '' : 'hidden'}">日处理量（仅水处理项目，万m³/d）
+            <input id="pf_daily" type="number" step="0.01" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm text-right tabular-nums" value="${esc(p.dailyCapacity || '')}" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">建筑面积（㎡）
+            <input id="pf_area" type="number" step="0.01" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm text-right tabular-nums" value="${esc(p.area || '')}" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">当前总造价
+            <input readonly tabindex="-1" class="mt-1 h-9 w-full rounded border border-slate-300 bg-slate-50 px-2 text-sm text-right font-medium tabular-nums text-slate-700" value="${fmtMoney(p.totalCost || 0, p.currency)}" />
+          </label>
+        </div>
+      </section>
+
+      <section class="bg-white border border-slate-200 rounded-xl p-4">
+        <div class="mb-3">
+          <div class="font-semibold text-slate-800">指标口径</div>
+          <div class="mt-1 text-xs text-slate-500">这些字段会影响指标分桶和项目对标，请尽量填写。</div>
+        </div>
+        <div class="grid grid-cols-4 gap-3">
+          <label class="block text-xs font-medium text-slate-500">结构形式
+            <input id="pf_struct" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm" placeholder="钢筋砼 / 砖混 / 钢结构" value="${esc(p.structure || '')}" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">专业 / 工艺特征
+            <input id="pf_proc" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm" placeholder="填写主要专业、工艺或建设内容" value="${esc(p.process || '')}" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">地区
+            <input id="pf_region" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm" placeholder="例如：江苏·南京" value="${esc(p.region || '')}" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">价格年份
+            <input id="pf_price_year" type="number" min="2000" max="2100" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm tabular-nums" value="${esc(p.priceYear || '')}" placeholder="2026" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">计价省份
+            <input id="pf_price_province" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm" value="${esc(p.pricingRegion?.province || '')}" placeholder="例如：四川" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">计价城市
+            <input id="pf_price_city" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm" value="${esc(p.pricingRegion?.city || '')}" placeholder="例如：成都" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">计价区县
+            <input id="pf_price_district" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm" value="${esc(p.pricingRegion?.district || '')}" placeholder="可选" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">计价日期
+            <input id="pf_pricing_date" type="date" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm" value="${esc(p.pricingDate || '')}" />
+          </label>
+          <label class="block text-xs font-medium text-slate-500">项目本位币
+            <select id="pf_currency" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm">${CURRENCY_OPTIONS.map(currency => `<option value="${currency.code}" ${normalizeCurrency(p.currency) === currency.code ? 'selected' : ''}>${esc(currencyLabel(currency.code))}</option>`).join('')}</select>
+            <span class="mt-1 block text-[11px] leading-4 text-slate-400">项目金额不自动换汇；不同币种项目将分开汇总。</span>
+          </label>
+          <label class="col-span-2 block text-xs font-medium text-slate-500">计价阶段
+            <select id="pf_stage" class="mt-1 h-9 w-full rounded border border-slate-300 bg-white px-2 text-sm">${['概算', '预算', '招标控制价', '投标报价', '结算参考'].map(stage => `<option value="${stage}" ${p.stage === stage ? 'selected' : ''}>${stage}</option>`).join('')}</select>
+          </label>
+        </div>
+      </section>
+    </div>
+  `, `
+    <button onclick="window.__modalClose ? window.__modalClose() : document.getElementById('modal').classList.add('hidden')" class="px-3 py-1.5 text-sm border border-slate-300 bg-white text-slate-700 rounded hover:bg-slate-50">取消</button>
+    <button id="pf_save" class="px-3 py-1.5 text-sm brand-bg text-white rounded">保存项目</button>
+  `);
+  const typeSelect = document.getElementById('pf_type');
+  const customTypeInput = document.getElementById('pf_type_custom');
+  const dailyWrap = document.getElementById('pf_daily_wrap');
+  const selectedTypeValue = () => typeSelect.value === '__custom__' ? customTypeInput.value.trim() : typeSelect.value;
+  const syncSpecialtyFields = () => dailyWrap.classList.toggle('hidden', !isWaterProjectType(selectedTypeValue()));
+  const syncCustomType = () => {
+    const custom = typeSelect.value === '__custom__';
+    customTypeInput.classList.toggle('hidden', !custom);
+    customTypeInput.required = custom;
+    if (custom) customTypeInput.focus();
+    syncSpecialtyFields();
+  };
+  typeSelect.addEventListener('change', syncCustomType);
+  customTypeInput.addEventListener('input', syncSpecialtyFields);
+  document.getElementById('pf_ai').onclick = () => {
+    const name = document.getElementById('pf_name').value.trim();
+    if (!name) {
+      toast('先填写项目名称，AI 才能识别项目信息。', 'error');
+      return;
+    }
+    const result = suggestProjectInfo(name);
+    (result.suggestions || []).forEach(item => {
+      const map = { type: 'pf_type', dailyCapacity: 'pf_daily', scale: 'pf_scale', process: 'pf_proc', structure: 'pf_struct' };
+      const el = document.getElementById(map[item.field]);
+      if (el && item.suggestedValue) el.value = item.suggestedValue;
+    });
+    syncSpecialtyFields();
+    toast(result.summary || 'AI 已识别项目信息', 'success');
+  };
+  document.getElementById('pf_save').onclick = async () => {
+    const obj = {
+      id: p.id || null,
+      name: document.getElementById('pf_name').value.trim(),
+      code: document.getElementById('pf_code').value.trim(),
+      client: document.getElementById('pf_client').value.trim(),
+      type: typeSelect.value === '__custom__' ? customTypeInput.value.trim() : typeSelect.value,
+      scale: document.getElementById('pf_scale').value,
+      dailyCapacity: document.getElementById('pf_daily').value,
+      area: document.getElementById('pf_area').value,
+      structure: document.getElementById('pf_struct').value,
+      process: document.getElementById('pf_proc').value,
+      region: document.getElementById('pf_region').value.trim(),
+      pricingRegion: {
+        province: document.getElementById('pf_price_province').value.trim(),
+        city: document.getElementById('pf_price_city').value.trim(),
+        district: document.getElementById('pf_price_district').value.trim(),
+      },
+      pricingDate: document.getElementById('pf_pricing_date').value,
+      currency: document.getElementById('pf_currency').value,
+      priceYear: document.getElementById('pf_price_year').value.trim(),
+      stage: document.getElementById('pf_stage').value,
+      status: document.getElementById('pf_status').value,
+    };
+    if (!obj.name) {
+      toast('请填写项目名称', 'error');
+      return;
+    }
+    if (!obj.type) {
+      toast('请选择或填写项目类型', 'error');
+      (typeSelect.value === '__custom__' ? customTypeInput : typeSelect).focus();
+      return;
+    }
+    try {
+      await projectService.save(obj);
+      if (obj.status === 'archived') await indicatorService.recompute();
+      closeModal();
+      toast('已保存', 'success');
+      render();
+    } catch (err) {
+      if (err?.code === 'ARCHIVE_BLOCKED') {
+        toast(`暂不能收录：${archiveBlockerText(err.eligibility)}`, 'error');
+        return;
+      }
+      throw err;
+    }
+  };
+}

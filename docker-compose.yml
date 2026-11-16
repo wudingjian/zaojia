@@ -1,0 +1,10 @@
+services:
+  zaojia-database:
+    image: jsntwdj/zaojia-database:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zaojia-database
+    restart: unless-stopped
+    ports:
+      - "8090:80"
